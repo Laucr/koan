@@ -57,6 +57,12 @@ KOAN_API_KEY=sk-dummy npm run koan -- run "Hello from Koan" \
   --no-persist
 ```
 
+For an interactive session with this non-streaming mock:
+
+```bash
+npm run koan -- chat --no-stream
+```
+
 Start with `--no-stream --no-tools` to verify basic chat-completions
 compatibility. Remove those flags afterward to exercise streaming and the
 ReAct tool-calling loop. The equivalent persistent environment settings are

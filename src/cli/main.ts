@@ -53,6 +53,7 @@ Flags:
   --model <name>                  Override model
   --base-url <url>                Override API base URL
   --timeout <ms>                  Per-LLM-call timeout (default 60000)
+  --no-stream                    Disable upstream streaming
   --max-rounds <n>                Max ReAct rounds per turn (default per profile)
   --auto-approve none|safe|all    Tool-approval mode (default: none, prompts)
   --allow-write                   Grant write permission
@@ -250,6 +251,7 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
       allowedPaths,
       maxRounds: effective.maxRounds,
       noTools,
+      noStream: flagAsBool(parsed, 'no-stream'),
       approver,
       systemPromptOverride: effective.systemPrompt,
       toolNamesOverride: effective.toolNames,

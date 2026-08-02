@@ -8,6 +8,7 @@
 import OpenAI from 'openai';
 import type { LLMRequest } from '../core/types.js';
 import { type LLMStreamEvent, type LLMStreamingClient, StreamAccumulator } from '../core/streaming.js';
+import { mapOpenAIToolNames } from './openai-tool-names.js';
 
 export interface OpenAIStreamingOptions {
   apiKey?: string;
@@ -23,14 +24,15 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
   const defaultTimeout = opts?.defaultTimeoutMs ?? 60_000;
 
   return async function* (req: LLMRequest): AsyncIterable<LLMStreamEvent> {
+    const mapped = mapOpenAIToolNames(req);
     const chatReq: any = {
       model: req.model,
-      messages: req.messages,
+      messages: mapped.messages,
       stream: true,
     };
     if (req.tools && req.tools.length) {
-      chatReq.tools = req.tools;
-      chatReq.tool_choice = req.tool_choice;
+      chatReq.tools = mapped.tools;
+      chatReq.tool_choice = mapped.toolChoice;
     }
 
     const timeoutMs = req.timeoutMs ?? defaultTimeout;
@@ -68,7 +70,8 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
         if (Array.isArray(delta.tool_calls)) {
           for (const tcDelta of delta.tool_calls) {
             const idx = tcDelta.index ?? 0;
-            const name = tcDelta.function?.name;
+            const wireName = tcDelta.function?.name;
+            const name = wireName ? mapped.fromWireName(wireName) : undefined;
             const id = tcDelta.id;
             const argsDelta = tcDelta.function?.arguments;
 

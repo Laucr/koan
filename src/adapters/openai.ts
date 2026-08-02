@@ -3,6 +3,7 @@
  */
 import OpenAI from 'openai';
 import { LLMClient, LLMRequest, LLMResponse } from '../core/types.js';
+import { mapOpenAIToolNames } from './openai-tool-names.js';
 
 export interface OpenAIClientOptions {
   apiKey?: string;
@@ -19,13 +20,14 @@ export function createOpenAIClient(opts?: OpenAIClientOptions): LLMClient {
   const defaultTimeout = opts?.defaultTimeoutMs ?? 60_000;
 
   return async (req: LLMRequest): Promise<LLMResponse> => {
+    const mapped = mapOpenAIToolNames(req);
     const chatReq: any = {
       model: req.model,
-      messages: req.messages,
+      messages: mapped.messages,
     };
     if (req.tools && req.tools.length) {
-      chatReq.tools = req.tools;
-      chatReq.tool_choice = req.tool_choice;
+      chatReq.tools = mapped.tools;
+      chatReq.tool_choice = mapped.toolChoice;
     }
 
     // Compose the caller's signal with a fresh timeout signal so the SDK
@@ -49,7 +51,7 @@ export function createOpenAIClient(opts?: OpenAIClientOptions): LLMClient {
         content: msg?.content ?? null,
         tool_calls: msg?.tool_calls?.map((tc: any) => ({
           id: tc.id,
-          function: { name: tc.function?.name, arguments: tc.function?.arguments },
+          function: { name: mapped.fromWireName(tc.function?.name), arguments: tc.function?.arguments },
         })),
       },
       usage: resp.usage ? {

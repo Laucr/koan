@@ -24,7 +24,7 @@ import type { LLMStreamEvent } from '../core/streaming.js';
 import type { ToolPermission, AgentConfig, ToolGateMode, RawMessage } from '../core/types.js';
 import type { ToolApprover } from '../core/loop.js';
 import { resolveConfig, type ResolvedConfig } from './config.js';
-import { buildStreamingLLMClient } from './provider.js';
+import { buildLLMClient, buildStreamingLLMClient } from './provider.js';
 import { createTTYApprover, autoApprover } from './approve.js';
 import { ReplSession } from './session.js';
 import { handleSlash } from './slash.js';
@@ -52,6 +52,8 @@ export interface ReplOptions {
   maxRounds?: number;
   /** Disable the default toolkit (knowledge-only). */
   noTools?: boolean;
+  /** Use ordinary chat completions instead of upstream streaming. */
+  noStream?: boolean;
   /** Override the system prompt (M5: comes from the selected profile). */
   systemPromptOverride?: string;
   /** Restrict the tools surfaced to the model (M5: from profile.tools). */
@@ -113,7 +115,8 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
   // Build streaming client once; respects the current resolved config. When
   // /model fires we still use the same client — only the agent config's
   // `model` field changes per-turn.
-  const streamLLM = buildStreamingLLMClient(resolved);
+  const llm = opts.noStream ? buildLLMClient(resolved) : undefined;
+  const streamLLM = opts.noStream ? undefined : buildStreamingLLMClient(resolved);
 
   const approver: ToolApprover = opts.approver ?? createTTYApprover({ output: stderr });
 
@@ -259,6 +262,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           sessionId: opts.sessionId,
           history: session.getHistory(),
           agentConfig: cfg,
+          llm,
           streamLLM,
           onStreamEvent,
           userId: 'local',
@@ -272,6 +276,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           userMemoryFetcher: opts.memoryStore ? memoryFetcherFor(opts.memoryStore) : undefined,
           pendingMemoryWrites: opts.pendingMemoryWrites,
         });
+        if (opts.noStream) stdout.write(result.finalAnswer);
         // Reflect the new tail into the in-memory ReplSession.
         for (const m of result.newMessages) {
           // Append via the envelope path so we don't double-append the user
@@ -289,6 +294,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
         // No-store path: run the loop directly, merge result back.
         const result = await runReActAgent({
           agentConfig: cfg,
+          llm,
           streamLLM,
           onStreamEvent,
           userId: 'local',
@@ -303,6 +309,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           userMemoryFetcher: opts.memoryStore ? memoryFetcherFor(opts.memoryStore) : undefined,
           pendingMemoryWrites: opts.pendingMemoryWrites,
         });
+        if (opts.noStream) stdout.write(result.finalAnswer);
         session.mergeRunResult(result.history);
         stdout.write('\n');
         for (const w of result.warnings) stderr.write(`warning: ${w}\n`);
