@@ -1,14 +1,20 @@
 ---
 feature: koan-product
-artifact: plan
-version: 1.0
-prd_version: 1.0
+artifact: prd
+version: 1.3
 last_aligned: 2026-08-02
-status: stale
-stale_since: 1.3
+status: current
 ---
 
-# Milestone Plan: Build Koan, a Runnable Agent Product
+# Product Requirements: Build Koan, a Runnable Agent Product
+
+## Amendments
+
+| Version | Date | Amendment | Summary |
+|---|---|---|---|
+| v1.1 | 2026-08-02 | [r1](../amendments/koan-product-r1.md) | Make the OpenAI-compatible base URL configurable in every LLM-backed mode. |
+| v1.2 | 2026-08-02 | [r2](../amendments/koan-product-r2.md) | Support strict OpenAI tool-name schemas and non-streaming interactive endpoints. |
+| v1.3 | 2026-08-02 | [r3](../amendments/koan-product-r3.md) | Log LLM I/O on demand and always render the final chat answer. |
 
 **Goal:** Grow Koan's ReAct substrate (`koan`) into a **runnable, general-purpose agent system** — usable like Claude Code (interactive CLI loop with tool use, streaming, file/shell access, multi-turn sessions) but **not domain-locked to coding**. The same binary should also serve as a long-running HTTP server so other front-ends (web UIs, IDE plugins, automation jobs) can talk to it.
 
@@ -28,6 +34,25 @@ stale_since: 1.3
 3. **Plug-in surface widens; runtime stays rigid.** New tools and middlewares register through the existing surfaces; no special cases.
 4. **Adapter abstraction over concrete vendors.** LLM, persistence, transport, terminal — each swappable.
 5. **Observability is part of "done."** A milestone isn't complete until traces, logs, and structured errors land for the new code path.
+
+## OpenAI-compatible endpoint requirements
+
+- The API base URL is selectable through `--base-url` for `run`, `chat`, and
+  `serve`, with `KOAN_BASE_URL` and the user config file providing persistent
+  defaults under the normal flag-over-env-over-file precedence.
+- Koan may retain namespaced internal tool names such as `fs.read`, but the
+  OpenAI adapter must translate every tool definition, forced tool choice, and
+  historical tool call to a schema-safe wire name matching
+  `^[a-zA-Z0-9_-]+$`, then translate returned calls back before dispatch.
+- Interactive chat supports `--no-stream` for OpenAI-compatible endpoints that
+  implement chat completions but not SSE streaming.
+- Chat always renders the completed answer, including answers delivered through
+  `submit_final_answer`; it must not duplicate text already rendered as stream
+  deltas.
+- `KOAN_LOG_LEVEL=debug` logs the complete LLM request and assembled response
+  with model, base URL, request id, and duration. `trace` additionally logs raw
+  streaming chunks. Authorization secrets must not be logged, and documentation
+  must warn that prompts, tool arguments, and answers can be sensitive.
 
 ---
 
