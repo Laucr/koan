@@ -1,0 +1,25 @@
+name: demo-qa-yaml
+systemPromptTemplate: |
+  You are a research assistant for {{user_name}}.
+  Preferences: {{user_preferences}}
+  Always use tools for facts when possible. Finish by calling submit_final_answer.
+model: gpt-4o-mini
+maxRounds: 8
+tokenBudget: 16000
+slackTokens: 600
+memory:
+  inConversation:
+    foldStrategy: prefix_with_ref
+    compactWatermark: 5000
+  acrossConversation:
+    enabled: true
+tools:
+  - search_web
+  - submit_final_answer
+  - calculator
+  - write_user_memory
+middlewares:
+  - safety-filter
+  - observer-demo
+defaultGate:
+  search: auto
