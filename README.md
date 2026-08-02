@@ -62,6 +62,14 @@ compatibility. Remove those flags afterward to exercise streaming and the
 ReAct tool-calling loop. The equivalent persistent environment settings are
 `KOAN_BASE_URL`, `KOAN_MODEL`, and `KOAN_API_KEY`.
 
+`--base-url` is supported by all LLM-backed CLI modes:
+
+```bash
+koan run "..." --base-url http://127.0.0.1:8000/v1
+koan chat --base-url http://127.0.0.1:8000/v1
+koan serve --base-url http://127.0.0.1:8000/v1
+```
+
 ## Subcommands
 
 ```

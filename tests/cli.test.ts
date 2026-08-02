@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { resolveConfig, FileConfigSchema } from '../src/cli/config.js';
 import { parseArgv, flagAsString, flagAsBool, flagAsNumber } from '../src/cli/argv.js';
+import { serveLLMFlags } from '../src/cli/serve-subcommand.js';
 import { StreamAccumulator, type LLMStreamEvent, type LLMStreamingClient } from '../src/index.js';
 import { runReActAgent, createAgentConfig, TerminationReason } from '../src/index.js';
 import type { LLMRequest, LLMResponse, LLMClient } from '../src/index.js';
@@ -33,10 +34,15 @@ describe('resolveConfig', () => {
   });
   it('flags override env, env overrides default', () => {
     const r = resolveConfig({
-      env: { OPENAI_API_KEY: 'sk', KOAN_MODEL: 'env-model' },
-      flags: { model: 'flag-model' },
+      env: {
+        OPENAI_API_KEY: 'sk',
+        KOAN_MODEL: 'env-model',
+        KOAN_BASE_URL: 'http://env.example/v1',
+      },
+      flags: { model: 'flag-model', baseURL: 'http://flag.example/v1' },
     });
     expect(r.model).toBe('flag-model');
+    expect(r.baseURL).toBe('http://flag.example/v1');
     expect(r.sources.model).toBe('flag');
     expect(r.apiKey).toBe('sk');
   });
@@ -53,6 +59,24 @@ describe('resolveConfig', () => {
     expect(() => FileConfigSchema.parse({ apiKey: 'sk' })).toThrow();
     expect(() => FileConfigSchema.parse({ token: 'x' })).toThrow();
     expect(() => FileConfigSchema.parse({ provider: 'openai' })).not.toThrow();
+  });
+});
+
+describe('serve LLM flags', () => {
+  it('maps --base-url and related arguments into provider config', () => {
+    const parsed = parseArgv([
+      '--provider', 'openai',
+      '--model', 'gpt-mock',
+      '--base-url', 'http://127.0.0.1:8000/v1',
+      '--timeout', '15000',
+    ]);
+
+    expect(serveLLMFlags(parsed)).toEqual({
+      provider: 'openai',
+      model: 'gpt-mock',
+      baseURL: 'http://127.0.0.1:8000/v1',
+      llmTimeoutMs: 15000,
+    });
   });
 });
 
