@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ReplSession, saveSession, loadSession, SESSION_FORMAT_VERSION } from '../src/cli/session.js';
+import { shouldRenderFinalAnswer } from '../src/cli/repl.js';
 import { handleSlash } from '../src/cli/slash.js';
 import type { ConversationHistory, ProcessedMessage } from '../src/index.js';
 
@@ -18,6 +19,17 @@ const mkSession = () => new ReplSession({
 
 const pm = (role: 'user' | 'assistant' | 'tool', content: string, extra: Partial<ProcessedMessage> = {}): ProcessedMessage =>
   ({ role, content, tokens: 1, isInSuffix: true, ...extra });
+
+describe('REPL final-answer rendering', () => {
+  it('prints non-streaming and terminator-tool answers', () => {
+    expect(shouldRenderFinalAnswer('answer', '', true)).toBe(true);
+    expect(shouldRenderFinalAnswer('final answer', 'Let me check.', false)).toBe(true);
+  });
+
+  it('does not duplicate an answer already rendered by streaming deltas', () => {
+    expect(shouldRenderFinalAnswer('final answer', 'Working...final answer', false)).toBe(false);
+  });
+});
 
 // ── ReplSession ─────────────────────────────────────────────────────────
 

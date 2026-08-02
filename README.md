@@ -230,6 +230,10 @@ SSE event reference.
   `KOAN_LOG_FORMAT=pretty` for human-readable output on a TTY, or
   `KOAN_LOG_FORMAT=json` to force JSON.
 - **Levels**: `KOAN_LOG_LEVEL=info` (default; `trace`/`debug`/`warn`/`error`/`silent` also work).
+- **LLM I/O**: `KOAN_LOG_LEVEL=debug` logs complete requests and assembled
+  responses; `trace` additionally logs every streaming chunk. These payloads
+  can contain prompts, tool arguments, and model answers, so enable them only
+  when that data is safe to write to your terminal or log collector.
 - **Metrics**: Prometheus text format at `GET /v1/metrics` (unauthenticated).
   Exposes counters for HTTP requests, rounds, tokens, tool calls, cost;
   histograms for round duration and HTTP latency; gauges for active

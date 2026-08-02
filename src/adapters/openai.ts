@@ -4,6 +4,10 @@
 import OpenAI from 'openai';
 import { LLMClient, LLMRequest, LLMResponse } from '../core/types.js';
 import { mapOpenAIToolNames } from './openai-tool-names.js';
+import { getLogger } from '../obs/log.js';
+
+const log = getLogger('openai');
+let requestSequence = 0;
 
 export interface OpenAIClientOptions {
   apiKey?: string;
@@ -29,6 +33,14 @@ export function createOpenAIClient(opts?: OpenAIClientOptions): LLMClient {
       chatReq.tools = mapped.tools;
       chatReq.tool_choice = mapped.toolChoice;
     }
+    const requestLog = log.child({
+      requestId: `llm_${++requestSequence}`,
+      model: req.model,
+      baseURL: opts?.baseURL,
+      streaming: false,
+    });
+    const startedAt = Date.now();
+    requestLog.debug({ request: chatReq }, 'LLM request');
 
     // Compose the caller's signal with a fresh timeout signal so the SDK
     // call aborts on whichever fires first.
@@ -40,6 +52,10 @@ export function createOpenAIClient(opts?: OpenAIClientOptions): LLMClient {
     let resp;
     try {
       resp = await client.chat.completions.create(chatReq as any, { signal });
+      requestLog.debug({ response: resp, durationMs: Date.now() - startedAt }, 'LLM response');
+    } catch (error) {
+      requestLog.error({ err: error, durationMs: Date.now() - startedAt }, 'LLM request failed');
+      throw error;
     } finally {
       clearTimeout(timer);
     }

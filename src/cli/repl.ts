@@ -232,6 +232,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
   // ── runTurn ──────────────────────────────────────────────────────────
   async function runTurn(userText: string): Promise<'continue' | 'exit'> {
     session.appendUserMessage(userText);
+    let streamedText = '';
 
     turnAbort = new AbortController();
 
@@ -249,7 +250,10 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
     });
 
     const onStreamEvent = (e: LLMStreamEvent) => {
-      if (e.type === 'text_delta') stdout.write(e.text);
+      if (e.type === 'text_delta') {
+        streamedText += e.text;
+        stdout.write(e.text);
+      }
       else if (e.type === 'tool_call_started') stdout.write(`\n[→ ${e.name}(...)]\n`);
       else if (e.type === 'error') stderr.write(`\n[stream error] ${e.error.message}\n`);
     };
@@ -276,7 +280,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           userMemoryFetcher: opts.memoryStore ? memoryFetcherFor(opts.memoryStore) : undefined,
           pendingMemoryWrites: opts.pendingMemoryWrites,
         });
-        if (opts.noStream) stdout.write(result.finalAnswer);
+        renderFinalAnswer(result.finalAnswer);
         // Reflect the new tail into the in-memory ReplSession.
         for (const m of result.newMessages) {
           // Append via the envelope path so we don't double-append the user
@@ -309,7 +313,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           userMemoryFetcher: opts.memoryStore ? memoryFetcherFor(opts.memoryStore) : undefined,
           pendingMemoryWrites: opts.pendingMemoryWrites,
         });
-        if (opts.noStream) stdout.write(result.finalAnswer);
+        renderFinalAnswer(result.finalAnswer);
         session.mergeRunResult(result.history);
         stdout.write('\n');
         for (const w of result.warnings) stderr.write(`warning: ${w}\n`);
@@ -333,7 +337,27 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
     rl.setPrompt('> ');
     rl.prompt();
     return 'continue';
+
+    function renderFinalAnswer(finalAnswer: string): void {
+      const final = finalAnswer.trim();
+      if (!final) return;
+      // Direct streaming answers have already been printed delta-by-delta.
+      // Terminator-tool answers have not, so print those after the run.
+      if (!shouldRenderFinalAnswer(finalAnswer, streamedText, !!opts.noStream)) return;
+      if (streamedText && !streamedText.endsWith('\n')) stdout.write('\n');
+      stdout.write(finalAnswer);
+    }
   }
+}
+
+export function shouldRenderFinalAnswer(
+  finalAnswer: string,
+  streamedText: string,
+  noStream: boolean,
+): boolean {
+  const final = finalAnswer.trim();
+  if (!final) return false;
+  return noStream || !streamedText.trimEnd().endsWith(final);
 }
 
 function banner(out: NodeJS.WritableStream, cfg: ResolvedConfig, profileName?: string): void {

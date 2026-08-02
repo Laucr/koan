@@ -9,6 +9,10 @@ import OpenAI from 'openai';
 import type { LLMRequest } from '../core/types.js';
 import { type LLMStreamEvent, type LLMStreamingClient, StreamAccumulator } from '../core/streaming.js';
 import { mapOpenAIToolNames } from './openai-tool-names.js';
+import { getLogger } from '../obs/log.js';
+
+const log = getLogger('openai');
+let requestSequence = 0;
 
 export interface OpenAIStreamingOptions {
   apiKey?: string;
@@ -34,6 +38,14 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
       chatReq.tools = mapped.tools;
       chatReq.tool_choice = mapped.toolChoice;
     }
+    const requestLog = log.child({
+      requestId: `llm_stream_${++requestSequence}`,
+      model: req.model,
+      baseURL: opts?.baseURL,
+      streaming: true,
+    });
+    const startedAt = Date.now();
+    requestLog.debug({ request: chatReq }, 'LLM request');
 
     const timeoutMs = req.timeoutMs ?? defaultTimeout;
     const timeoutCtrl = new AbortController();
@@ -56,6 +68,7 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
       const stream = await client.chat.completions.create(chatReq as any, { signal });
 
       for await (const chunk of stream as any) {
+        requestLog.trace({ chunk }, 'LLM stream chunk');
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) {
           if (chunk.usage) usage = chunk.usage;
@@ -99,6 +112,7 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
         if (chunk.usage) usage = chunk.usage;
       }
     } catch (e: any) {
+      requestLog.error({ err: e, durationMs: Date.now() - startedAt }, 'LLM request failed');
       yield { type: 'error', error: e instanceof Error ? e : new Error(String(e)) };
       return;
     } finally {
@@ -110,6 +124,7 @@ export function createOpenAIStreamingClient(opts?: OpenAIStreamingOptions): LLMS
       prompt_tokens: usage.prompt_tokens ?? 0,
       completion_tokens: usage.completion_tokens ?? 0,
     } : undefined);
+    requestLog.debug({ response: completed, durationMs: Date.now() - startedAt }, 'LLM response');
     for (const tc of completed.message.tool_calls ?? []) {
       // We don't know the index reliably here; iterate the started set in order.
     }
