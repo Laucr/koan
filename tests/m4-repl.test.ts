@@ -6,8 +6,9 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { PassThrough, Writable } from 'node:stream';
 import { ReplSession, saveSession, loadSession, SESSION_FORMAT_VERSION } from '../src/cli/session.js';
-import { shouldRenderFinalAnswer } from '../src/cli/repl.js';
+import { repl, shouldRenderFinalAnswer } from '../src/cli/repl.js';
 import { handleSlash } from '../src/cli/slash.js';
 import type { ConversationHistory, ProcessedMessage } from '../src/index.js';
 
@@ -28,6 +29,37 @@ describe('REPL final-answer rendering', () => {
 
   it('does not duplicate an answer already rendered by streaming deltas', () => {
     expect(shouldRenderFinalAnswer('final answer', 'Working...final answer', false)).toBe(false);
+  });
+});
+
+describe('REPL initial prompt', () => {
+  it('renders the prompt before waiting for the first input line', async () => {
+    const input = new PassThrough();
+    let output = '';
+    const stdout = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString();
+        callback();
+      },
+    });
+    const stderr = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+
+    const running = repl({
+      input,
+      stdout: stdout as NodeJS.WriteStream,
+      stderr: stderr as NodeJS.WriteStream,
+      noTools: true,
+      noStream: true,
+      config: {
+        provider: 'openai', model: 'gpt-mock', apiKey: 'sk-test',
+        llmTimeoutMs: 1000,
+        sources: { provider: 'flag', model: 'flag', apiKey: 'env' },
+      },
+    });
+
+    expect(output).toContain('> ');
+    input.end('/exit\n');
+    await running;
   });
 });
 

@@ -155,6 +155,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
   process.on('SIGINT', onSigint);
 
   banner(stdout, resolved, opts.profileName);
+  rl.prompt();
 
   // Multi-line accumulator state.
   let inBlock = false;
