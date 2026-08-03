@@ -24,6 +24,7 @@
  * runs up to a 30-second deadline; closes stores.
  */
 import http from 'node:http';
+import fs from 'node:fs';
 import {
   type Route, type Req, type Handler,
   sendJson, sendError, sseStart, sseEvent, HttpError, makeDispatch, matchRoute,
@@ -50,6 +51,11 @@ import type { ToolApprover, ToolApproval } from '../core/loop.js';
 import { getLogger } from '../obs/log.js';
 import { getMetrics } from '../obs/metrics.js';
 import type { ToolPermission, RawMessage } from '../core/types.js';
+import type { TranscriptSink } from '../transcript/types.js';
+import {
+  defaultTranscriptRoot, ensureTranscriptRoot, newTranscriptEvent,
+  openSessionTranscript, transcriptPathFor,
+} from '../transcript/index.js';
 
 export interface ServeOptions {
   port?: number;
@@ -68,6 +74,9 @@ export interface ServeOptions {
   memoryStore?: UserMemoryStore;
   /** Approval timeout in ms. Defaults to 60s. */
   approvalTimeoutMs?: number;
+  /** Override transcript persistence. Injected stores default to false in tests. */
+  transcriptsEnabled?: boolean;
+  transcriptsDirectory?: string;
 }
 
 const VERSION = '0.2.0';
@@ -96,6 +105,12 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
   initRegistries();
 
   const resolved = opts.config ?? resolveConfig({});
+  const transcriptsEnabled = opts.transcriptsEnabled
+    ?? (opts.sessionStore ? false : (resolved.transcripts?.enabled ?? true));
+  const transcriptRoot = opts.transcriptsDirectory
+    ?? resolved.transcripts?.directory
+    ?? defaultTranscriptRoot();
+  if (transcriptsEnabled) await ensureTranscriptRoot(transcriptRoot);
 
   const dbPath = defaultSessionsDbPath();
   const sessionStore = opts.sessionStore ?? new SqliteSessionStore({ filePath: dbPath });
@@ -104,6 +119,15 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
   const lock = new SessionRunLock();
   const limiter = new RateLimiter({ rpm: opts.rpm ?? 60 });
   const approvals = new ApprovalCoordinator();
+  const transcripts = new Map<string, TranscriptSink>();
+  async function transcriptFor(record: import('../persistence/session-store.js').SessionRecord): Promise<TranscriptSink | undefined> {
+    if (!transcriptsEnabled) return undefined;
+    const existing = transcripts.get(record.id);
+    if (existing) return existing;
+    const writer = await openSessionTranscript(record, transcriptRoot);
+    transcripts.set(record.id, writer);
+    return writer;
+  }
   // Pending-write queues are per-session (so one session can't accept
   // another's stage). Reaped on session DELETE.
   const pendingByession = new Map<string, PendingWriteQueue>();
@@ -153,7 +177,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
       throw new HttpError(400, e.message);
     }
     const id = newSessionId();
-    await sessionStore.create({
+    const created = await sessionStore.create({
       id,
       profile: profileResolution.name,
       provider: provider ?? resolved.provider,
@@ -163,8 +187,13 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
       usage: { promptTokens: 0, completionTokens: 0, toolCalls: 0, rounds: 0 },
       messages: [],
     });
-    const rec = await sessionStore.get(id);
-    sendJson(req.res, 201, rec);
+    try {
+      await transcriptFor(created);
+    } catch (error) {
+      await sessionStore.delete(id).catch(() => false);
+      throw error;
+    }
+    sendJson(req.res, 201, created);
   };
 
   const listSessionsHandler: Handler = async (req) => {
@@ -184,9 +213,38 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
     approvals.cancelSession(req.params.id);
     lock.abort(req.params.id, new Error('session deleted'));
     pendingByession.delete(req.params.id);
-    const ok = await sessionStore.delete(req.params.id);
-    if (!ok) throw new HttpError(404, 'session not found');
-    sendJson(req.res, 200, { deleted: req.params.id });
+    const record = await sessionStore.get(req.params.id);
+    if (!record) throw new HttpError(404, 'session not found');
+    const writer = transcripts.get(req.params.id);
+    if (writer) {
+      await writer.close();
+      transcripts.delete(req.params.id);
+    }
+    const transcriptPath = transcriptPathFor(record.id, record.createdAt, transcriptRoot);
+    const tombstone = `${transcriptPath}.deleting-${process.pid}-${Date.now()}`;
+    let staged = false;
+    if (transcriptsEnabled) {
+      try {
+        await fs.promises.rename(transcriptPath, tombstone);
+        staged = true;
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+    let ok: boolean;
+    try {
+      ok = await sessionStore.delete(req.params.id);
+      if (!ok) throw new HttpError(404, 'session not found');
+    } catch (error) {
+      if (staged) await fs.promises.rename(tombstone, transcriptPath).catch(() => undefined);
+      if (writer && transcriptsEnabled) {
+        const reopened = await openSessionTranscript(record, transcriptRoot).catch(() => undefined);
+        if (reopened) transcripts.set(record.id, reopened);
+      }
+      throw error;
+    }
+    if (staged) await fs.promises.unlink(tombstone);
+    sendJson(req.res, 200, { deleted: req.params.id, transcriptDeleted: transcriptsEnabled });
   };
 
   const cancelMessageHandler: Handler = (req) => {
@@ -302,6 +360,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
         // profile explicitly opts in (memory_mechanism.md §8).
         userMemoryFetcher: profile.acrossConversationMemory ? memoryFetcherFor(memoryStore) : undefined,
         pendingMemoryWrites: pendingWrites,
+        transcript: await transcriptFor(rec),
       });
 
       // Final event: the whole result (without the raw history — the client
@@ -375,6 +434,15 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
       }
       // Force-abort anything still running.
       for (const run of lock.activeRuns()) run.abort.abort(new Error('server shutdown'));
+      for (const transcript of transcripts.values()) {
+        try {
+          await transcript.append([newTranscriptEvent('session.closed', { reason: 'server_shutdown' })]);
+          await transcript.close();
+        } catch (error: any) {
+          log.warn({ sessionId: transcript.sessionId, path: transcript.path, err: error?.message || error }, 'transcript close failed');
+        }
+      }
+      transcripts.clear();
       sessionStore.close?.();
       memoryStore.close?.();
       approvals.cancelSession('*');

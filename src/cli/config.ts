@@ -18,6 +18,11 @@ import { z } from 'zod';
 export const ProviderSchema = z.enum(['openai', 'anthropic']);
 export type Provider = z.infer<typeof ProviderSchema>;
 
+export const TranscriptFileConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  directory: z.string().min(1).optional(),
+}).strict();
+
 export const FileConfigSchema = z.object({
   provider: ProviderSchema.default('openai'),
   model: z.string().default('gpt-4o-mini'),
@@ -25,6 +30,7 @@ export const FileConfigSchema = z.object({
   llmTimeoutMs: z.number().int().positive().default(60_000),
   // Profile selection (used in M5; harmless to accept now).
   profile: z.string().optional(),
+  transcripts: TranscriptFileConfigSchema.default({}),
 }).strict()
   // Reject secret-bearing keys with a hint.
   .superRefine((v, ctx) => {
@@ -46,6 +52,13 @@ export interface CLIFlags {
   baseURL?: string;
   llmTimeoutMs?: number;
   profile?: string;
+  transcriptEnabled?: boolean;
+  transcriptDirectory?: string;
+}
+
+export interface ResolvedTranscriptConfig {
+  enabled: boolean;
+  directory?: string;
 }
 
 export interface ResolvedConfig {
@@ -55,6 +68,7 @@ export interface ResolvedConfig {
   apiKey: string;
   llmTimeoutMs: number;
   profile?: string;
+  transcripts: ResolvedTranscriptConfig;
   // For diagnostics: where each value came from.
   sources: {
     provider: 'default' | 'file' | 'env' | 'flag';
@@ -78,6 +92,34 @@ export function readFileConfig(filePath: string = defaultConfigPath()): FileConf
     throw new Error(`Failed to parse ${filePath}: ${e.message}`);
   }
   return FileConfigSchema.parse(parsed);
+}
+
+function parseEnvBoolean(name: string, raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be one of: true, false, 1, 0, yes, no, on, off`);
+}
+
+export function resolveTranscriptConfig(opts?: {
+  filePath?: string;
+  flags?: Pick<CLIFlags, 'transcriptEnabled' | 'transcriptDirectory'>;
+  env?: NodeJS.ProcessEnv;
+}): ResolvedTranscriptConfig {
+  const env = opts?.env ?? process.env;
+  const flags = opts?.flags ?? {};
+  const file = readFileConfig(opts?.filePath);
+  return {
+    enabled: flags.transcriptEnabled
+      ?? parseEnvBoolean('KOAN_TRANSCRIPTS_ENABLED', env.KOAN_TRANSCRIPTS_ENABLED)
+      ?? file?.transcripts.enabled
+      ?? true,
+    directory: flags.transcriptDirectory
+      ?? env.KOAN_TRANSCRIPTS_DIR
+      ?? file?.transcripts.directory
+      ?? undefined,
+  };
 }
 
 /** Merge file + env + flags into one config. Throws on missing API key. */
@@ -148,6 +190,8 @@ export function resolveConfig(opts?: {
     file?.profile ??
     undefined;
 
+  const transcripts = resolveTranscriptConfig({ filePath: opts?.filePath, flags, env });
+
   return {
     provider,
     model,
@@ -155,6 +199,7 @@ export function resolveConfig(opts?: {
     apiKey,
     llmTimeoutMs,
     profile,
+    transcripts,
     sources: { provider: providerSource, model: modelSource, apiKey: apiKeySource },
   };
 }

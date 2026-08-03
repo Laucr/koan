@@ -20,6 +20,9 @@ Flags:
   --base-url <url>          Override LLM API base URL
   --timeout <ms>            Per-LLM-call timeout (default 60000)
   --approval-timeout <ms>   Approval auto-deny timeout (default 60000)
+  --transcripts             Write canonical session JSONL (default)
+  --no-transcripts          Keep SQLite persistence but skip session JSONL
+  --transcripts-dir <dir>   Override the transcript root directory
   -h, --help                Show this help
 
 Notes:
@@ -45,6 +48,10 @@ export function serveLLMFlags(parsed: ParsedArgv): CLIFlags {
     model: flagAsString(parsed, 'model'),
     baseURL: flagAsString(parsed, 'base-url', 'baseUrl'),
     llmTimeoutMs: flagAsNumber(parsed, 'timeout', 'llm-timeout-ms'),
+    transcriptEnabled: flagAsBool(parsed, 'no-transcripts')
+      ? false
+      : flagAsBool(parsed, 'transcripts') ? true : undefined,
+    transcriptDirectory: flagAsString(parsed, 'transcripts-dir'),
   };
 }
 
@@ -75,6 +82,8 @@ export async function serveSubcommand(argv: string[]): Promise<number> {
       config: resolved,
       llmTimeoutMs: resolved.llmTimeoutMs,
       approvalTimeoutMs,
+      transcriptsEnabled: resolved.transcripts.enabled,
+      transcriptsDirectory: resolved.transcripts.directory,
     });
   } catch (e: any) {
     process.stderr.write(`error: ${e.message}\n`);

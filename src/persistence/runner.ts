@@ -18,6 +18,9 @@ import type { SessionStore, SessionRecord } from './session-store.js';
 import type { PendingWriteQueue } from '../core/memory.js';
 import { getMetrics } from '../obs/metrics.js';
 import { costFor } from '../obs/cost.js';
+import type { TranscriptSink, NewTranscriptEvent } from '../transcript/types.js';
+import { newTranscriptEvent } from '../transcript/koan.js';
+import type { AgentLifecycleEvent } from '../core/events.js';
 
 export interface RunTurnOptions {
   store: SessionStore;
@@ -37,6 +40,8 @@ export interface RunTurnOptions {
   cwd: string;
   allowedPaths: string[];
   initialSearchGate?: ToolGateMode;
+  /** Optional canonical JSONL sink. Events flush only after SQLite succeeds. */
+  transcript?: TranscriptSink;
   /** Across-conv memory fetcher; piped into runReActAgent. */
   userMemoryFetcher?: (uid: string) => Promise<Record<string, string>>;
   /** Pending-write confirmation queue for write_user_memory. */
@@ -53,6 +58,7 @@ export interface RunTurnResult {
   rounds: number;
   warnings: string[];
   usage: { promptTokens: number; completionTokens: number };
+  termination: string;
 }
 
 /**
@@ -70,6 +76,46 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const startedAt = Date.now();
   const profileName = opts.agentConfig.name;
   const modelName = opts.agentConfig.model;
+  const turnId = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const transcriptEvents: NewTranscriptEvent[] = [];
+  if (opts.transcript) {
+    transcriptEvents.push(newTranscriptEvent('turn.started', {}, { turnId }));
+    const userMessage = [...opts.history].reverse().find(message => message.role === 'user');
+    if (userMessage) {
+      transcriptEvents.push(newTranscriptEvent('message.user', {
+        content: userMessage.content,
+        ...(userMessage.media?.length ? { media: userMessage.media } : {}),
+      }, { turnId }));
+    }
+  }
+
+  const captureLifecycle = (event: AgentLifecycleEvent): void => {
+    if (!opts.transcript) return;
+    if (event.type === 'assistant_message') {
+      transcriptEvents.push(newTranscriptEvent('message.assistant', {
+        content: event.content,
+        round: event.round,
+        ...(event.toolCalls?.length ? { tool_calls: event.toolCalls } : {}),
+      }, { timestamp: event.timestamp, turnId }));
+    } else if (event.type === 'tool_started') {
+      transcriptEvents.push(newTranscriptEvent('tool.started', {
+        call_id: event.id,
+        name: event.name,
+        arguments: event.arguments,
+        round: event.round,
+      }, { timestamp: event.timestamp, turnId }));
+    } else {
+      transcriptEvents.push(newTranscriptEvent('tool.completed', {
+        call_id: event.id,
+        name: event.name,
+        arguments: event.arguments,
+        content: event.content,
+        status: event.error ? 'failed' : 'completed',
+        duration_ms: event.durationMs,
+        round: event.round,
+      }, { timestamp: event.timestamp, turnId }));
+    }
+  };
 
   const result = await runReActAgent({
     agentConfig: opts.agentConfig,
@@ -83,6 +129,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
         completionTokens += e.response.usage.completion_tokens;
       }
     } : undefined,
+    onLifecycleEvent: captureLifecycle,
     userId: opts.userId,
     initialMessages: opts.history,
     signal: opts.signal,
@@ -96,6 +143,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
     pendingMemoryWrites: opts.pendingMemoryWrites,
     memoryWriter: opts.memoryWriter,
   });
+  if (promptTokens === 0 && completionTokens === 0 && result.usage) {
+    promptTokens = result.usage.promptTokens;
+    completionTokens = result.usage.completionTokens;
+  }
 
   // Convert the loop's ProcessedMessage history back to RawMessage and diff
   // against `opts.history` to extract the new tail.
@@ -120,6 +171,24 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
     rounds: result.rounds,
   });
 
+  const warnings = [...result.warnings];
+  if (opts.transcript) {
+    transcriptEvents.push(newTranscriptEvent('turn.completed', {
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+      },
+      rounds: result.rounds,
+      tool_calls: result.toolCallsMade,
+      termination_reason: result.termination,
+    }, { turnId }));
+    try {
+      await opts.transcript.append(transcriptEvents);
+    } catch (error: any) {
+      warnings.push(`transcript incomplete at ${opts.transcript.path}: ${error?.message || error}`);
+    }
+  }
+
   // Metrics emission. `outcome` is best-effort — the loop's structured
   // termination reason is the canonical signal; we encode it loosely here.
   const durationSec = (Date.now() - startedAt) / 1000;
@@ -140,8 +209,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
     newMessages: tail,
     toolCallsMade: result.toolCallsMade,
     rounds: result.rounds,
-    warnings: result.warnings,
+    warnings,
     usage: { promptTokens, completionTokens },
+    termination: result.termination,
   };
 }
 

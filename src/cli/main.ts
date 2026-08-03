@@ -25,6 +25,8 @@ import {
   memoryFetcherFor,
 } from '../persistence/index.js';
 import { PendingWriteQueue } from '../core/memory.js';
+import type { TranscriptSink } from '../transcript/types.js';
+import { defaultTranscriptRoot, ensureTranscriptRoot, newTranscriptEvent, openSessionTranscript } from '../transcript/index.js';
 
 const HELP = `usage: koan [<subcommand>] [args]
 
@@ -62,6 +64,9 @@ Flags:
   --allow-path <dir>              Extra path allowed for fs.* tools (repeatable)
   --no-tools                      Disable the default toolkit (knowledge-only)
   --no-persist                    Don't persist this session to the sessions DB
+  --transcripts                   Write canonical session JSONL (default with persistence)
+  --no-transcripts                Keep SQLite persistence but skip session JSONL
+  --transcripts-dir <dir>         Override the transcript root directory
   --continue                      Continue the most recent session
   --resume <id>                   Continue a specific session by id
   -h, --help                      Show this help
@@ -123,6 +128,10 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
     baseURL: flagAsString(parsed, 'base-url', 'baseUrl'),
     llmTimeoutMs: flagAsNumber(parsed, 'timeout', 'llm-timeout-ms'),
     profile: profileResolution.name,
+    transcriptEnabled: flagAsBool(parsed, 'no-transcripts')
+      ? false
+      : flagAsBool(parsed, 'transcripts') ? true : undefined,
+    transcriptDirectory: flagAsString(parsed, 'transcripts-dir'),
   };
   let resolved: ResolvedConfig;
   try {
@@ -179,11 +188,23 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
   const noPersist = flagAsBool(parsed, 'no-persist');
   const wantContinue = flagAsBool(parsed, 'continue');
   const resumeId = flagAsString(parsed, 'resume');
+  const transcriptRoot = resolved.transcripts.directory ?? defaultTranscriptRoot();
+
+  if (!noPersist && resolved.transcripts.enabled) {
+    try {
+      await ensureTranscriptRoot(transcriptRoot);
+    } catch (e: any) {
+      process.stderr.write(`error: cannot initialize transcript directory ${transcriptRoot}: ${e?.message || e}\n`);
+      return 1;
+    }
+  }
 
   let store: SessionStore;
   let memStore: UserMemoryStore;
   let sessionId: string | undefined;
+  let sessionRecord: import('../persistence/session-store.js').SessionRecord | undefined;
   let initialHistory: import('../core/types.js').RawMessage[] | undefined;
+  let createdFresh = false;
 
   if (noPersist) {
     store = new MemorySessionStore();
@@ -204,6 +225,7 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
         return 1;
       }
       sessionId = rec.id;
+      sessionRecord = rec;
       initialHistory = rec.messages.map(m => ({ ...m }));
     } else if (wantContinue) {
       const list = await store.list({ limit: 1 });
@@ -211,6 +233,7 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
         const rec = await store.get(list[0].id);
         if (rec) {
           sessionId = rec.id;
+          sessionRecord = rec;
           initialHistory = rec.messages.map(m => ({ ...m }));
         }
       } else {
@@ -220,7 +243,7 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
 
     if (!sessionId) {
       sessionId = newSessionId();
-      await store.create({
+      sessionRecord = await store.create({
         id: sessionId,
         profile: profileResolution.name,
         provider: resolved.provider,
@@ -230,6 +253,7 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
         usage: { promptTokens: 0, completionTokens: 0, toolCalls: 0, rounds: 0 },
         messages: [],
       });
+      createdFresh = true;
     }
   } catch (e: any) {
     process.stderr.write(`error: ${e.message}\n`);
@@ -238,9 +262,25 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
     return 1;
   }
 
+  let transcript: TranscriptSink | undefined;
+  if (!noPersist && resolved.transcripts.enabled) {
+    try {
+      sessionRecord ??= await store.get(sessionId);
+      if (!sessionRecord) throw new Error(`session "${sessionId}" could not be reloaded`);
+      transcript = await openSessionTranscript(sessionRecord, transcriptRoot);
+    } catch (e: any) {
+      if (createdFresh) await store.delete(sessionId).catch(() => false);
+      process.stderr.write(`error: cannot initialize transcript: ${e?.message || e}\n`);
+      store.close();
+      memStore.close?.();
+      return 1;
+    }
+  }
+
   process.stderr.write(`profile: ${profileResolution.name} (${profileResolution.source})\n`);
   if (!noPersist) {
     process.stderr.write(`session: ${sessionId}${initialHistory && initialHistory.length ? ` (resumed, ${initialHistory.length} messages)` : ''}\n`);
+    if (transcript) process.stderr.write(`transcript: ${transcript.path}\n`);
   }
 
   try {
@@ -264,8 +304,17 @@ async function chatSubcommand(parsedArgs: string[], rawArgv: string[]): Promise<
       // through when the profile opts in (memory_mechanism.md §8).
       memoryStore: profile.acrossConversationMemory ? memStore : undefined,
       pendingMemoryWrites: pendingWrites,
+      transcript,
     });
   } finally {
+    if (transcript) {
+      try {
+        await transcript.append([newTranscriptEvent('session.closed', { reason: 'chat_exit' })]);
+        await transcript.close();
+      } catch (e: any) {
+        process.stderr.write(`warning: transcript close failed at ${transcript.path}: ${e?.message || e}\n`);
+      }
+    }
     store.close();
     memStore.close?.();
   }

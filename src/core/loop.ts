@@ -11,6 +11,7 @@ import {
   ToolPermission,
 } from './types.js';
 import type { LLMStreamEvent, LLMStreamingClient } from './streaming.js';
+import type { AgentLifecycleSubscriber } from './events.js';
 import { ConversationState } from './state.js';
 import { HistoryProcessor } from './history.js';
 import { ToolGate } from './toolgate.js';
@@ -32,6 +33,8 @@ export interface RunAgentOptions {
   streamLLM?: LLMStreamingClient;
   /** Subscriber for streaming events (text deltas, tool-call assembly). */
   onStreamEvent?: (e: LLMStreamEvent, ctx: { round: number }) => void;
+  /** Provider-neutral completed agent activity for persistence/audit sinks. */
+  onLifecycleEvent?: AgentLifecycleSubscriber;
   initialMessages?: any[]; // raw
   userId: string;
   conversationId?: string;
@@ -306,6 +309,8 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
   }
 
   let totalToolCalls = 0;
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
   const warnings: string[] = [];
   let lastPromptTokens = 0; // cached, fed into watermark trigger
 
@@ -424,6 +429,10 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
       }
       break;
     }
+    if (llmResp.usage) {
+      totalPromptTokens += llmResp.usage.prompt_tokens;
+      totalCompletionTokens += llmResp.usage.completion_tokens;
+    }
 
     // 7. Parse tool calls from LLM response.
     // Structured mode: read message.tool_calls.
@@ -462,6 +471,13 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
       isInSuffix: true,
     };
     mutableHist.suffix.push(assistantMsg);
+    opts.onLifecycleEvent?.({
+      type: 'assistant_message',
+      timestamp: new Date().toISOString(),
+      round: currentRound,
+      content: assistantContent,
+      ...(hadCalls ? { toolCalls: parsedCalls.map(call => ({ ...call, arguments: { ...call.arguments } })) } : {}),
+    });
 
     // 8. If no calls (structural done), terminate
     let execResults: ToolCallResult[] = [];
@@ -475,6 +491,30 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
         break;
       }
     } else {
+      const toolStartedAt = parsedCalls.map(() => Date.now());
+      const lifecycleArguments = parsedCalls.map(call => {
+        const def = getTool(call.name) || effectiveTools.find(tool => tool.name === call.name);
+        if (!def?.paramsSchema) return { ...call.arguments };
+        try {
+          const parsed = def.paramsSchema.parse(call.arguments);
+          return parsed && typeof parsed === 'object'
+            ? { ...(parsed as Record<string, unknown>) }
+            : { ...call.arguments };
+        } catch {
+          return { ...call.arguments };
+        }
+      });
+      parsedCalls.forEach((call, callIndex) => {
+        opts.onLifecycleEvent?.({
+          type: 'tool_started',
+          timestamp: new Date().toISOString(),
+          round: currentRound,
+          id: call.id,
+          name: call.name,
+          arguments: lifecycleArguments[callIndex],
+        });
+      });
+
       // 9. Recovery interception: run BEFORE the middleware chain so the
       //    framework-internal protocol is invisible to middlewares. Calls
       //    that aren't recovery go through the chain normally.
@@ -505,6 +545,31 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
         warnings.push(`Tool exec error: ${e.message}`);
         execResults = otherCalls.map(c => ({ name: c.name, content: `error: ${e.message}`, error: true }));
       }
+
+      const unmatchedResults = new Set(execResults.map((_, index) => index));
+      parsedCalls.forEach((call, callIndex) => {
+        let resultIndex = execResults.findIndex((result, index) =>
+          unmatchedResults.has(index) && !!call.id && result.id === call.id
+        );
+        if (resultIndex < 0) {
+          resultIndex = execResults.findIndex((result, index) =>
+            unmatchedResults.has(index) && result.name === call.name
+          );
+        }
+        const result = resultIndex >= 0 ? execResults[resultIndex] : undefined;
+        if (resultIndex >= 0) unmatchedResults.delete(resultIndex);
+        opts.onLifecycleEvent?.({
+          type: 'tool_completed',
+          timestamp: new Date().toISOString(),
+          round: currentRound,
+          id: call.id,
+          name: call.name,
+          arguments: lifecycleArguments[callIndex],
+          content: result?.content ?? (middlewareVetoed ? 'middleware vetoed' : 'tool produced no result'),
+          error: result ? !!result.error : true,
+          durationMs: Math.max(0, Date.now() - toolStartedAt[callIndex]),
+        });
+      });
 
       // Append tool results to history (for model to see)
       for (const res of execResults) {
@@ -592,6 +657,7 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
     termination: finalTerm.reason,
     toolCallsMade: totalToolCalls,
     warnings,
+    usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
   };
 }
 

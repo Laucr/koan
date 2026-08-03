@@ -317,4 +317,5 @@ export interface AgentRunResult {
   termination: TerminationReason;
   toolCallsMade: number;
   warnings: string[];
+  usage?: { promptTokens: number; completionTokens: number };
 }

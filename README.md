@@ -84,7 +84,7 @@ koan run "<prompt>"             One-shot prompt → final answer
 koan chat                       Open the REPL explicitly
 koan serve                      Start the HTTP server
 koan profile <list|show|edit|where>
-koan sessions <list|show|resume|delete|where>
+koan sessions <list|show|resume|delete|export|where>
 koan help
 ```
 
@@ -95,8 +95,8 @@ Every subcommand accepts `--help`.
 Resolution precedence (later wins):
 
 1. `~/.config/koan/config.json` — non-secret defaults
-2. environment variables: `KOAN_PROVIDER`, `KOAN_MODEL`, `KOAN_BASE_URL`, `KOAN_LLM_TIMEOUT_MS`
-3. CLI flags: `--provider`, `--model`, `--base-url`, `--timeout`
+2. environment variables: `KOAN_PROVIDER`, `KOAN_MODEL`, `KOAN_BASE_URL`, `KOAN_LLM_TIMEOUT_MS`, `KOAN_TRANSCRIPTS_ENABLED`, `KOAN_TRANSCRIPTS_DIR`
+3. CLI flags: `--provider`, `--model`, `--base-url`, `--timeout`, `--transcripts`, `--no-transcripts`, `--transcripts-dir`
 
 API keys come **only** from environment variables:
 
@@ -174,11 +174,38 @@ koan sessions list
 koan sessions show s_xxx
 koan sessions resume s_xxx       # open in REPL
 koan sessions delete s_xxx
+koan sessions where              # print the SQLite path
+koan sessions where --transcripts
+koan sessions export s_xxx --format koan
+koan sessions export s_xxx --format codex --output session.codex.jsonl
+koan sessions export s_xxx --format claude --output session.claude.jsonl
 
 koan run --continue "..."        # resume the most recent
 koan run --resume s_xxx "..."    # resume a specific session
 koan run --no-persist "..."      # don't write to the DB
 ```
+
+Persistent sessions also write a canonical, append-only JSONL transcript by
+default. Files live under
+`$XDG_DATA_HOME/koan/transcripts/YYYY/MM/DD/<session-id>.jsonl` (normally
+`~/.local/share/koan/transcripts/...`) with user-only permissions. SQLite
+remains the source of truth for resume; JSONL is the portable event record.
+
+Use `--no-transcripts` to retain SQLite persistence without JSONL, or
+`--no-persist` to disable both. The config file accepts:
+
+```json
+{
+  "transcripts": {
+    "enabled": true,
+    "directory": "/optional/custom/root"
+  }
+}
+```
+
+Deleting a session deletes its associated transcript. Codex and Claude
+exports target their documented public CLI JSONL streams; Koan does not copy
+their private on-disk session formats and cannot import them for resume.
 
 ## Cross-session memory
 
@@ -228,7 +255,11 @@ SSE event reference.
 
 - **Logging**: structured via `pino`. JSON to stderr by default; set
   `KOAN_LOG_FORMAT=pretty` for human-readable output on a TTY, or
-  `KOAN_LOG_FORMAT=json` to force JSON.
+  `KOAN_LOG_FORMAT=json` to force JSON. Koan does not create an operational
+  log file; redirect stderr or use a log collector when a file is required.
+- **Session transcripts**: canonical context JSONL is separate from Pino
+  diagnostics. Find it with `koan sessions where --transcripts`; export a
+  stored session with `koan sessions export`.
 - **Levels**: `KOAN_LOG_LEVEL=info` (default; `trace`/`debug`/`warn`/`error`/`silent` also work).
 - **LLM I/O**: `KOAN_LOG_LEVEL=debug` logs complete requests and assembled
   responses; `trace` additionally logs every streaming chunk. These payloads

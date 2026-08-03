@@ -33,6 +33,7 @@ import { runTurn as runStoredTurn } from '../persistence/runner.js';
 import type { UserMemoryStore } from '../persistence/user-memory-store.js';
 import { memoryFetcherFor } from '../persistence/memory-fetcher.js';
 import type { PendingWriteQueue } from '../core/memory.js';
+import type { TranscriptSink } from '../transcript/types.js';
 
 export interface ReplOptions {
   /** Override the resolved config (used by tests). */
@@ -74,6 +75,8 @@ export interface ReplOptions {
   /** Pending-write queue for write_user_memory. Always created if memoryStore
    *  is set; tests can inject their own. */
   pendingMemoryWrites?: PendingWriteQueue;
+  /** Canonical JSONL sink for persisted turns. */
+  transcript?: TranscriptSink;
 }
 
 export async function repl(opts: ReplOptions = {}): Promise<number> {
@@ -280,6 +283,7 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
           initialSearchGate: opts.initialSearchGate,
           userMemoryFetcher: opts.memoryStore ? memoryFetcherFor(opts.memoryStore) : undefined,
           pendingMemoryWrites: opts.pendingMemoryWrites,
+          transcript: opts.transcript,
         });
         renderFinalAnswer(result.finalAnswer);
         // Reflect the new tail into the in-memory ReplSession.

@@ -28,6 +28,8 @@ import {
 import { InMemoryUserMemoryStore } from '../persistence/index.js';
 import { PendingWriteQueue } from '../core/memory.js';
 import { runTurn, recordToInitialMessages } from '../persistence/runner.js';
+import type { TranscriptSink } from '../transcript/types.js';
+import { defaultTranscriptRoot, ensureTranscriptRoot, newTranscriptEvent, openSessionTranscript } from '../transcript/index.js';
 
 export interface RunSubcommandOptions {
   stdout?: NodeJS.WriteStream;
@@ -37,6 +39,8 @@ export interface RunSubcommandOptions {
   /** Inject a store (used by tests). Defaults to SqliteSessionStore on disk,
    *  or MemorySessionStore when --no-persist is set. */
   store?: SessionStore;
+  /** Inject a transcript sink for tests/library callers. */
+  transcript?: TranscriptSink;
 }
 
 const HELP = `usage: koan run "<prompt>" [flags]
@@ -58,6 +62,9 @@ Flags:
   --allow-path <dir>              Extra path allowed for fs.* tools (repeatable)
   --no-tools                      Disable the default toolkit (knowledge-only)
   --no-persist                    Don't write this run to the sessions DB
+  --transcripts                   Write canonical session JSONL (default with persistence)
+  --no-transcripts                Keep SQLite persistence but skip session JSONL
+  --transcripts-dir <dir>         Override the transcript root directory
   --continue                      Continue the most recent session (rehydrates history)
   --resume <id>                   Continue a specific session by id
   -h, --help                      Show this help
@@ -123,6 +130,10 @@ export async function runSubcommand(
     baseURL: flagAsString(parsed, 'base-url', 'baseUrl'),
     llmTimeoutMs: flagAsNumber(parsed, 'timeout', 'llm-timeout-ms'),
     profile: profileResolution.name,
+    transcriptEnabled: flagAsBool(parsed, 'no-transcripts')
+      ? false
+      : flagAsBool(parsed, 'transcripts') ? true : undefined,
+    transcriptDirectory: flagAsString(parsed, 'transcripts-dir'),
   };
   let resolved: ResolvedConfig;
   try {
@@ -189,10 +200,22 @@ export async function runSubcommand(
     closeStore = true;
   }
   const pendingWrites = new PendingWriteQueue();
+  const transcriptRoot = resolved.transcripts.directory ?? defaultTranscriptRoot();
+  if (!noPersist && resolved.transcripts.enabled && !opts.transcript && !opts.store) {
+    try {
+      await ensureTranscriptRoot(transcriptRoot);
+    } catch (e: any) {
+      stderr.write(`error: cannot initialize transcript directory ${transcriptRoot}: ${e?.message || e}\n`);
+      if (closeStore) { store.close(); memStore.close?.(); }
+      return 1;
+    }
+  }
 
   // History the loop will see. Either: rehydrate from a prior session and
   // append the new user message, or start fresh with just the user message.
   let sessionId: string;
+  let sessionRecord: import('../persistence/session-store.js').SessionRecord | undefined;
+  let createdFresh = false;
   let priorHistory: import('../core/types.js').RawMessage[] = [];
   try {
     if (resumeId) {
@@ -202,6 +225,7 @@ export async function runSubcommand(
         return 1;
       }
       sessionId = rec.id;
+      sessionRecord = rec;
       priorHistory = recordToInitialMessages(rec);
     } else if (wantContinue) {
       const list = await store.list({ limit: 1 });
@@ -215,6 +239,7 @@ export async function runSubcommand(
           return 1;
         }
         sessionId = rec.id;
+        sessionRecord = rec;
         priorHistory = recordToInitialMessages(rec);
       } else {
         sessionId = await createFreshSession();
@@ -230,7 +255,7 @@ export async function runSubcommand(
 
   async function createFreshSession(): Promise<string> {
     const id = newSessionId();
-    await store.create({
+    sessionRecord = await store.create({
       id,
       profile: profileResolution.name,
       provider: resolved.provider,
@@ -240,7 +265,23 @@ export async function runSubcommand(
       usage: { promptTokens: 0, completionTokens: 0, toolCalls: 0, rounds: 0 },
       messages: [],
     });
+    createdFresh = true;
     return id;
+  }
+
+  let transcript = opts.transcript;
+  if (!transcript && !opts.store && !noPersist && resolved.transcripts.enabled) {
+    try {
+      sessionRecord ??= await store.get(sessionId);
+      if (!sessionRecord) throw new Error(`session "${sessionId}" could not be reloaded`);
+      transcript = await openSessionTranscript(sessionRecord, transcriptRoot);
+      stderr.write(`transcript: ${transcript.path}\n`);
+    } catch (e: any) {
+      if (createdFresh) await store.delete(sessionId).catch(() => false);
+      stderr.write(`error: cannot initialize transcript: ${e?.message || e}\n`);
+      if (closeStore) { store.close(); memStore.close?.(); }
+      return 1;
+    }
   }
 
   const history = [...priorHistory, { role: 'user' as const, content: prompt }];
@@ -295,6 +336,7 @@ export async function runSubcommand(
       // explicitly opts in (memory_mechanism.md §8: off by default).
       userMemoryFetcher: profile.acrossConversationMemory ? memoryFetcherFor(memStore) : undefined,
       pendingMemoryWrites: pendingWrites,
+      transcript,
     });
 
     if (noStream) stdout.write(result.finalAnswer);
@@ -326,6 +368,14 @@ export async function runSubcommand(
     exitCode = 1;
   } finally {
     process.off('SIGINT', onSigint);
+    if (transcript) {
+      try {
+        await transcript.append([newTranscriptEvent('session.closed', { exit_code: exitCode })]);
+        await transcript.close();
+      } catch (e: any) {
+        stderr.write(`warning: transcript close failed at ${transcript.path}: ${e?.message || e}\n`);
+      }
+    }
     if (closeStore) {
       store.close();
       memStore.close?.();

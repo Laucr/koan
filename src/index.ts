@@ -42,6 +42,8 @@ export type { ServeOptions, ServerHandle } from './server/index.js';
 export { getLogger, resetLogger } from './obs/log.js';
 export { MetricsRegistry, getMetrics, resetMetrics } from './obs/metrics.js';
 export { costFor, formatCost } from './obs/cost.js';
+export * from './transcript/index.js';
+export type { AgentLifecycleEvent, AgentLifecycleSubscriber } from './core/events.js';
 
 // Re-export some constants
 export { TerminationReason, CompactionStrategy, ToolGateMode, CLEAN_TERMINATION, ProtocolMode } from './core/types.js';
