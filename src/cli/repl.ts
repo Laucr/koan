@@ -25,7 +25,7 @@ import type { ToolPermission, AgentConfig, ToolGateMode, RawMessage } from '../c
 import type { ToolApprover } from '../core/loop.js';
 import { resolveConfig, type ResolvedConfig } from './config.js';
 import { buildLLMClient, buildStreamingLLMClient } from './provider.js';
-import { createTTYApprover, autoApprover } from './approve.js';
+import { createTTYApprover, LineInputBroker } from './approve.js';
 import { ReplSession } from './session.js';
 import { handleSlash } from './slash.js';
 import type { SessionStore } from '../persistence/session-store.js';
@@ -121,14 +121,17 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
   const llm = opts.noStream ? buildLLMClient(resolved) : undefined;
   const streamLLM = opts.noStream ? undefined : buildStreamingLLMClient(resolved);
 
-  const approver: ToolApprover = opts.approver ?? createTTYApprover({ output: stderr });
-
   // ── readline plumbing ────────────────────────────────────────────────
   const rl = readline.createInterface({
     input: input as any,
     output: stdout,
     terminal: true,
     prompt: '> ',
+  });
+  const lineInput = new LineInputBroker(rl);
+  const approver: ToolApprover = opts.approver ?? createTTYApprover({
+    output: stderr,
+    readLine: () => lineInput.readLine(),
   });
 
   // Turn-scoped abort controller. Replaced before each run; SIGINT pops it.
@@ -168,11 +171,14 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
   const cleanup = () => {
     process.off('SIGINT', onSigint);
     rl.removeAllListeners('SIGINT');
+    lineInput.dispose();
     rl.close();
   };
 
   try {
-    for await (const line of rl as any as AsyncIterable<string>) {
+    while (true) {
+      const line = await lineInput.readLine();
+      if (line === undefined) break;
       pendingExit = false; // any input resets the double-Ctrl-C state
 
       // Multi-line: """ on its own line opens/closes a block.

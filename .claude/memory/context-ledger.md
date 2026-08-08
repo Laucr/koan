@@ -1,6 +1,6 @@
 # Context Ledger
 
-Last updated: 2026-08-02 by builder
+Last updated: 2026-08-08 by inquest
 
 ## Blueprint
 
@@ -13,6 +13,10 @@ Last updated: 2026-08-02 by builder
 - **portable-session-jsonl** (2026-08-02, working tree): schema-v1 JSONL writer, SQLite-first turn batches, default-on CLI/HTTP persistence, Koan/Codex/Claude export, coordinated deletion
 - **Diverged from plan**: supplied mock cannot emit tool calls, so smoke covered two-turn resume/export/delete and deterministic tests cover tool lifecycle; injected HTTP stores require explicit transcript enablement
 - **Tech debt**: public compatibility projections need fixture refresh when upstream contracts change; full suite retains three unrelated existing failures documented in the build report
+
+## Inquest
+
+- **koan-product** (2026-08-08, working tree): smoke — code-bug: approval and REPL attached competing readline consumers → shared line broker fixed input ownership; verify in interactive chat
 
 ## Bailiff
 

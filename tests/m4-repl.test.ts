@@ -7,8 +7,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Writable } from 'node:stream';
+import readline from 'node:readline';
 import { ReplSession, saveSession, loadSession, SESSION_FORMAT_VERSION } from '../src/cli/session.js';
 import { repl, shouldRenderFinalAnswer } from '../src/cli/repl.js';
+import { createTTYApprover, LineInputBroker } from '../src/cli/approve.js';
 import { handleSlash } from '../src/cli/slash.js';
 import type { ConversationHistory, ProcessedMessage } from '../src/index.js';
 
@@ -60,6 +62,51 @@ describe('REPL initial prompt', () => {
     expect(output).toContain('> ');
     input.end('/exit\n');
     await running;
+  });
+});
+
+describe('REPL approval input isolation', () => {
+  for (const [answer, expected] of [
+    ['y', 'allow'],
+    ['n', 'deny'],
+    ['a', 'always'],
+  ] as const) {
+    it(`consumes ${answer} only as an approval decision`, async () => {
+      const input = new PassThrough();
+      const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+      const rl = readline.createInterface({ input, terminal: false });
+      const broker = new LineInputBroker(rl);
+      const approver = createTTYApprover({
+        output,
+        readLine: () => broker.readLine(),
+      });
+
+      const decision = approver({
+        toolName: 'fs.read', permission: 'read', args: { path: 'one.txt' }, round: 1,
+      });
+      input.write(`${answer}\n`);
+      expect(await decision).toBe(expected);
+
+      const nextLine = broker.readLine();
+      input.write(`next-after-${answer}\n`);
+      expect(await nextLine).toBe(`next-after-${answer}`);
+
+      broker.dispose();
+      rl.close();
+      input.end();
+    });
+  }
+
+  it('drains lines already buffered when stdin closes', async () => {
+    const input = new PassThrough();
+    const rl = readline.createInterface({ input, terminal: false });
+    const broker = new LineInputBroker(rl);
+    input.end('first\nsecond\n');
+    expect(await broker.readLine()).toBe('first');
+    expect(await broker.readLine()).toBe('second');
+    expect(await broker.readLine()).toBeUndefined();
+    broker.dispose();
+    rl.close();
   });
 });
 
