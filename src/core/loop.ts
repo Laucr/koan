@@ -64,7 +64,8 @@ export interface RunAgentOptions {
    * permission is in the granted set (so this can ask "are you sure?" for
    * destructive tools even though the capability was statically granted).
    * Return `'allow'` to run, `'deny'` to refuse, or `'always'` to skip the
-   * prompt for that tool name for the remainder of the run.
+   * prompt for that tool name for the remainder of the run. A structured
+   * `{ decision, reason? }` result can attach context to a denial.
    * A run with no approval callback proceeds for any permission that is
    * in `permissions`.
    */
@@ -90,7 +91,11 @@ export interface RunAgentOptions {
   memoryWriter?: (entry: { owner: string; key: string; value: string }) => Promise<void>;
 }
 
-export type ToolApproval = 'allow' | 'deny' | 'always';
+export type ToolApprovalDecision = 'allow' | 'deny' | 'always';
+export type ToolApproval = ToolApprovalDecision | {
+  decision: ToolApprovalDecision;
+  reason?: string;
+};
 export type ToolApprover = (req: {
   toolName: string;
   permission: ToolPermission;
@@ -221,14 +226,14 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
         }
         // Interactive approver (optional).
         if (opts.toolApprover && !alwaysAllow.has(toolDef.name)) {
-          let decision: ToolApproval;
+          let approval: { decision: ToolApprovalDecision; reason?: string };
           try {
-            decision = await opts.toolApprover({
+            approval = normalizeToolApproval(await opts.toolApprover({
               toolName: toolDef.name,
               permission: toolDef.permission,
               args: validatedArgs,
               round: state.getRound(),
-            });
+            }));
           } catch (e: any) {
             results.push({
               id: call.id, name: call.name,
@@ -236,15 +241,16 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
             });
             continue;
           }
-          if (decision === 'deny') {
+          if (approval.decision === 'deny') {
+            const reason = approval.reason ? ` Reason: ${approval.reason}` : '';
             results.push({
               id: call.id, name: call.name,
-              content: `PermissionDenied: user declined to run "${toolDef.name}".`,
+              content: `PermissionDenied: user declined to run "${toolDef.name}".${reason}`,
               error: true,
             });
             continue;
           }
-          if (decision === 'always') alwaysAllow.add(toolDef.name);
+          if (approval.decision === 'always') alwaysAllow.add(toolDef.name);
         }
       }
 
@@ -659,6 +665,17 @@ export async function runReActAgent(opts: RunAgentOptions): Promise<AgentRunResu
     warnings,
     usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
   };
+}
+
+function normalizeToolApproval(approval: ToolApproval): {
+  decision: ToolApprovalDecision;
+  reason?: string;
+} {
+  if (typeof approval === 'string') return { decision: approval };
+  const reason = approval.reason?.trim();
+  return reason
+    ? { decision: approval.decision, reason }
+    : { decision: approval.decision };
 }
 
 function renderTemplate(tpl: string, vars: Record<string, string>): string {

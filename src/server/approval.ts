@@ -13,10 +13,10 @@
  * keyed by `${sessionId}/${pendingId}` so a stale POST against a different
  * session can't satisfy another session's approval.
  */
-import type { ToolApproval } from '../core/loop.js';
+import type { ToolApprovalDecision } from '../core/loop.js';
 
 interface PendingApproval {
-  resolve: (decision: ToolApproval) => void;
+  resolve: (decision: ToolApprovalDecision) => void;
   timeoutId: NodeJS.Timeout;
   toolName: string;
 }
@@ -52,11 +52,11 @@ export class ApprovalCoordinator {
       argsPreview: string;
       emit: (event: ApprovalEvent) => void;
     },
-  ): Promise<ToolApproval> {
+  ): Promise<ToolApprovalDecision> {
     const pendingId = `ap_${++this.counter}`;
     const key = `${opts.sessionId}/${pendingId}`;
     const timeoutMs = opts.timeoutMs ?? 60_000;
-    return new Promise<ToolApproval>((resolve) => {
+    return new Promise<ToolApprovalDecision>((resolve) => {
       const timeoutId = setTimeout(() => {
         this.pending.delete(key);
         resolve('deny');
@@ -72,7 +72,7 @@ export class ApprovalCoordinator {
    * Resolve a pending approval. Returns true if a request was waiting,
    * false if the id was unknown or stale.
    */
-  resolveById(sessionId: string, pendingId: string, decision: ToolApproval): boolean {
+  resolveById(sessionId: string, pendingId: string, decision: ToolApprovalDecision): boolean {
     const key = `${sessionId}/${pendingId}`;
     const entry = this.pending.get(key);
     if (!entry) return false;

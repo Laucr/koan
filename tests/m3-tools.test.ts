@@ -249,6 +249,47 @@ describe('loop: approval gate', () => {
     expect(all.some((m: any) => m.role === 'tool' && /declined/.test(String(m.content)))).toBe(true);
   });
 
+  it('includes a trimmed structured denial reason in the model-visible result', async () => {
+    const cfg = createAgentConfig({
+      name: 'approve-deny-reason', maxRounds: 3, tools: ['fs.read'],
+    });
+    const llm = mkLLM([
+      reply('try', [tc('fs.read', { path: 'hello.txt' })]),
+      reply('use another approach'),
+    ]);
+    const r = await runReActAgent({
+      agentConfig: cfg, llm, userId: 'u',
+      initialMessages: [{ role: 'user', content: 'read' }],
+      permissions: new Set<ToolPermission>(['read']),
+      toolApprover: async () => ({ decision: 'deny', reason: '  use a safer path  ' }),
+      cwd: tmpRoot, allowedPaths: [tmpRoot],
+    });
+    const result = [...r.history.prefix, ...r.history.suffix]
+      .find((m: any) => m.role === 'tool' && /PermissionDenied/.test(String(m.content)));
+    expect(String(result?.content)).toContain('Reason: use a safer path');
+    expect(String(result?.content)).not.toContain('  use a safer path  ');
+  });
+
+  it('omits blank structured denial reasons', async () => {
+    const cfg = createAgentConfig({
+      name: 'approve-deny-blank', maxRounds: 3, tools: ['fs.read'],
+    });
+    const r = await runReActAgent({
+      agentConfig: cfg,
+      llm: mkLLM([
+        reply('try', [tc('fs.read', { path: 'hello.txt' })]),
+        reply('done'),
+      ]),
+      userId: 'u', initialMessages: [{ role: 'user', content: 'read' }],
+      permissions: new Set<ToolPermission>(['read']),
+      toolApprover: async () => ({ decision: 'deny', reason: '   ' }),
+      cwd: tmpRoot, allowedPaths: [tmpRoot],
+    });
+    const result = [...r.history.prefix, ...r.history.suffix]
+      .find((m: any) => m.role === 'tool' && /PermissionDenied/.test(String(m.content)));
+    expect(String(result?.content)).not.toContain('Reason:');
+  });
+
   it('"always" decision caches per-name; subsequent calls skip the approver', async () => {
     let prompts = 0;
     const approver: ToolApprover = async () => {

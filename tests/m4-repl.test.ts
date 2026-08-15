@@ -66,36 +66,79 @@ describe('REPL initial prompt', () => {
 });
 
 describe('REPL approval input isolation', () => {
-  for (const [answer, expected] of [
-    ['y', 'allow'],
-    ['n', 'deny'],
-    ['a', 'always'],
+  for (const [keys, expected] of [
+    [[{ name: 'up' }, { name: 'down' }, { name: 'return' }], 'allow'],
+    [[{ name: 'down' }, { name: 'return' }], 'always'],
+    [[{ name: 'up' }, { name: 'return' }], { decision: 'deny', reason: 'not safe' }],
   ] as const) {
-    it(`consumes ${answer} only as an approval decision`, async () => {
+    it(`consumes selector input only as an ${typeof expected === 'string' ? expected : 'deny'} decision`, async () => {
       const input = new PassThrough();
       const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
       const rl = readline.createInterface({ input, terminal: false });
-      const broker = new LineInputBroker(rl);
+      const broker = new LineInputBroker(rl, input as any);
       const approver = createTTYApprover({
         output,
         readLine: () => broker.readLine(),
+        select: request => broker.select(request),
       });
 
       const decision = approver({
         toolName: 'fs.read', permission: 'read', args: { path: 'one.txt' }, round: 1,
       });
-      input.write(`${answer}\n`);
-      expect(await decision).toBe(expected);
+      for (const key of keys) {
+        input.emit('keypress', '', key);
+        if (key.name === 'return') rl.emit('line', '');
+      }
+      if (typeof expected !== 'string') {
+        await new Promise(resolve => setImmediate(resolve));
+        input.write('not safe\n');
+      }
+      expect(await decision).toEqual(expected);
 
       const nextLine = broker.readLine();
-      input.write(`next-after-${answer}\n`);
-      expect(await nextLine).toBe(`next-after-${answer}`);
+      input.write('next-after-approval\n');
+      expect(await nextLine).toBe('next-after-approval');
 
       broker.dispose();
       rl.close();
       input.end();
     });
   }
+
+  it('omits a blank optional denial reason', async () => {
+    const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+    const approver = createTTYApprover({
+      output,
+      select: async () => ['deny'],
+      readLine: async () => '   ',
+    });
+    await expect(approver({
+      toolName: 'shell.exec', permission: 'shell', args: { command: 'false' }, round: 1,
+    })).resolves.toBe('deny');
+  });
+
+  it('releases selector ownership after Ctrl-C', async () => {
+    const input = new PassThrough();
+    const rl = readline.createInterface({ input, terminal: false });
+    const broker = new LineInputBroker(rl, input as any);
+    const interrupted = new Promise<void>(resolve => rl.once('SIGINT', resolve));
+    const selected = broker.select({
+      message: 'Pick',
+      options: [{ value: 'allow', label: 'Allow' }],
+      mode: 'single',
+      output: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    });
+    input.emit('keypress', '', { name: 'c', ctrl: true });
+    await expect(selected).resolves.toBeUndefined();
+    await interrupted;
+
+    const nextLine = broker.readLine();
+    input.write('after-interrupt\n');
+    await expect(nextLine).resolves.toBe('after-interrupt');
+    broker.dispose();
+    rl.close();
+    input.end();
+  });
 
   it('drains lines already buffered when stdin closes', async () => {
     const input = new PassThrough();
