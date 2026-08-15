@@ -47,7 +47,7 @@ import { createAgentConfig } from '../config/agent-loader.js';
 import { registerDefaultToolkit } from '../tools/index.js';
 import { initRegistries } from '../core/registry.js';
 import type { LLMStreamEvent } from '../core/streaming.js';
-import type { ToolApprover, ToolApproval } from '../core/loop.js';
+import type { ToolApprover, ToolApprovalDecision } from '../core/loop.js';
 import { getLogger } from '../obs/log.js';
 import { getMetrics } from '../obs/metrics.js';
 import type { ToolPermission, RawMessage } from '../core/types.js';
@@ -254,7 +254,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServerHandle
 
   const approveHandler: Handler = (req) => {
     const body = (req.body ?? {}) as any;
-    const decision = body.decision as ToolApproval;
+    const decision = body.decision as ToolApprovalDecision;
     if (!['allow', 'deny', 'always'].includes(decision)) {
       throw new HttpError(400, 'body must include decision: "allow" | "deny" | "always"');
     }

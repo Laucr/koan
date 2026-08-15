@@ -2,12 +2,18 @@
  * Interactive approval prompt for tool calls.
  *
  * When stdin is a TTY and `--auto-approve none` (the default), each tool
- * call triggers a y/n/a (allow / deny / always) prompt. In non-TTY mode
+ * call triggers an interactive selector. In non-TTY mode
  * the prompt is unavailable; the caller is expected to pass a different
  * approver (or use `--auto-approve safe|all`).
  */
 import readline from 'node:readline';
-import type { ToolApprover, ToolApproval } from '../core/loop.js';
+import type { ToolApprover, ToolApprovalDecision } from '../core/loop.js';
+import {
+  selectFromTTY,
+  selectTerminalOptions,
+  type SelectorKey,
+  type TerminalSelectRequest,
+} from './select.js';
 
 export interface ApproverOptions {
   /** stdin / stdout / stderr for the prompt. Defaults to process streams. */
@@ -15,6 +21,8 @@ export interface ApproverOptions {
   output?: NodeJS.WritableStream;
   /** Shared REPL line reader. When present, no competing readline is created. */
   readLine?: () => Promise<string | undefined>;
+  /** Shared REPL selector. When present, it owns key input for the prompt. */
+  select?: <T>(request: TerminalSelectRequest<T>) => Promise<T[] | undefined>;
 }
 
 interface LineSource {
@@ -22,7 +30,11 @@ interface LineSource {
   once(event: 'close', listener: () => void): this;
   off(event: 'line', listener: (line: string) => void): this;
   off(event: 'close', listener: () => void): this;
+  emit(event: 'SIGINT'): boolean;
 }
+
+type KeySource = NodeJS.ReadableStream;
+type KeyListener = Parameters<KeySource['on']>[1];
 
 /**
  * Single-consumer broker for one readline interface. Normal REPL input and
@@ -32,11 +44,21 @@ interface LineSource {
 export class LineInputBroker {
   private queued: string[] = [];
   private waiting: Array<(line: string | undefined) => void> = [];
+  private queuedKeys: SelectorKey[] = [];
+  private keyWaiting: Array<(key: SelectorKey | undefined) => void> = [];
+  private keyMode = false;
   private closed = false;
 
-  constructor(private readonly source: LineSource) {
+  constructor(
+    private readonly source: LineSource,
+    private readonly keySource?: KeySource,
+  ) {
     source.on('line', this.onLine);
     source.once('close', this.onClose);
+    if (keySource) {
+      readline.emitKeypressEvents(keySource);
+      keySource.on('keypress', this.onKeypress);
+    }
   }
 
   readLine(): Promise<string | undefined> {
@@ -46,16 +68,52 @@ export class LineInputBroker {
     return new Promise(resolve => this.waiting.push(resolve));
   }
 
+  async select<T>(request: TerminalSelectRequest<T>): Promise<T[] | undefined> {
+    if (!this.keySource) throw new Error('interactive key input is unavailable');
+    if (this.keyMode) throw new Error('an interactive selector is already active');
+    if (this.waiting.length > 0) throw new Error('line input is already waiting');
+    const suspended = this.keySource.listeners('keypress')
+      .filter(listener => listener !== this.onKeypress) as KeyListener[];
+    for (const listener of suspended) this.keySource.removeListener('keypress', listener);
+    this.keyMode = true;
+    try {
+      return await selectTerminalOptions({
+        ...request,
+        readKey: () => {
+          const queuedKey = this.queuedKeys.shift();
+          if (queuedKey) return Promise.resolve(queuedKey);
+          if (this.closed) return Promise.resolve(undefined);
+          return new Promise(resolve => this.keyWaiting.push(resolve));
+        },
+      });
+    } finally {
+      this.keyMode = false;
+      this.queuedKeys = [];
+      for (const waiter of this.keyWaiting.splice(0)) waiter(undefined);
+      for (const listener of suspended) this.keySource.on('keypress', listener);
+    }
+  }
+
   dispose(): void {
     this.source.off('line', this.onLine);
     this.source.off('close', this.onClose);
+    this.keySource?.off('keypress', this.onKeypress);
     this.finish(true);
   }
 
   private onLine = (line: string): void => {
+    if (this.keyMode) return;
     const waiter = this.waiting.shift();
     if (waiter) waiter(line);
     else this.queued.push(line);
+  };
+
+  private onKeypress = (_value: string, key: SelectorKey): void => {
+    if (!this.keyMode) return;
+    if (key.ctrl && key.name === 'c') this.source.emit('SIGINT');
+    const waiter = this.keyWaiting.shift();
+    if (waiter) waiter(key);
+    else this.queuedKeys.push(key);
   };
 
   private onClose = (): void => this.finish(false);
@@ -64,37 +122,59 @@ export class LineInputBroker {
     if (this.closed) return;
     this.closed = true;
     if (discardQueued) this.queued = [];
+    this.queuedKeys = [];
     for (const waiter of this.waiting.splice(0)) waiter(undefined);
+    for (const waiter of this.keyWaiting.splice(0)) waiter(undefined);
   }
 }
 
 export function createTTYApprover(opts: ApproverOptions = {}): ToolApprover {
-  const input = (opts.input ?? process.stdin) as NodeJS.ReadableStream & { isTTY?: boolean };
-  const output = opts.output ?? process.stderr;
+  const input = (opts.input ?? process.stdin) as NodeJS.ReadableStream & {
+    isRaw?: boolean;
+    isTTY?: boolean;
+    setRawMode?: (mode: boolean) => void;
+  };
+  const output = (opts.output ?? process.stderr) as NodeJS.WritableStream & { columns?: number };
   return async ({ toolName, permission, args }) => {
     const argsPreview = previewArgs(args);
     output.write(`\n[approval] ${toolName} (${permission}) ${argsPreview}\n`);
-    if (opts.readLine) {
-      output.write('  allow? [y]es / [n]o / [a]lways: ');
-      return approvalForAnswer(await opts.readLine());
+    const request: TerminalSelectRequest<ToolApprovalDecision> = {
+      message: 'Choose permission (\u2191/\u2193 to select, Enter to confirm)',
+      options: [
+        { value: 'allow', label: 'Allow once' },
+        { value: 'always', label: 'Allow always' },
+        { value: 'deny', label: 'Deny' },
+      ],
+      mode: 'single',
+      output,
+    };
+    const selected = opts.select
+      ? await opts.select(request)
+      : await selectFromTTY(request, input);
+    const decision = selected?.[0] ?? 'deny';
+    if (decision !== 'deny' || !selected) return decision;
+
+    output.write('Optional denial reason (Enter to skip): ');
+    const reason = (await readReason(opts, input, output))?.trim();
+    if (reason) {
+      return { decision: 'deny', reason };
     }
-    const rl = readline.createInterface({ input: input as any, output: output as any, terminal: false });
-    try {
-      const answer = await new Promise<string>((resolve) => {
-        rl.question('  allow? [y]es / [n]o / [a]lways: ', resolve);
-      });
-      return approvalForAnswer(answer);
-    } finally {
-      rl.close();
-    }
+    return 'deny';
   };
 }
 
-function approvalForAnswer(answer: string | undefined): ToolApproval {
-  const normalized = answer?.trim().toLowerCase() ?? '';
-  if (normalized === 'a' || normalized === 'always') return 'always';
-  if (normalized === 'y' || normalized === 'yes') return 'allow';
-  return 'deny';
+async function readReason(
+  opts: ApproverOptions,
+  input: NodeJS.ReadableStream,
+  output: NodeJS.WritableStream,
+): Promise<string | undefined> {
+  if (opts.readLine) return opts.readLine();
+  const rl = readline.createInterface({ input: input as any, output: output as any, terminal: false });
+  try {
+    return await new Promise<string>(resolve => rl.question('', resolve));
+  } finally {
+    rl.close();
+  }
 }
 
 function previewArgs(args: Record<string, unknown>): string {
@@ -106,6 +186,6 @@ function previewArgs(args: Record<string, unknown>): string {
   }
 }
 
-export function autoApprover(decision: ToolApproval): ToolApprover {
+export function autoApprover(decision: ToolApprovalDecision): ToolApprover {
   return async () => decision;
 }

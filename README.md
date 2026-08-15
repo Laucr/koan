@@ -155,8 +155,10 @@ koan run --allow-write "..."
 koan run --allow-shell --allow-path /tmp "..."
 ```
 
-In `--auto-approve none` mode (the default) any non-read tool prompts the
-user `y/n/a` before running. `shell.exec` additionally refuses obvious
+In `--auto-approve none` mode (the default) any non-read tool opens an
+arrow-key permission selector before running. Choose Allow once, Allow always,
+or Deny with ↑/↓ and Enter; Deny can include an optional reason.
+`shell.exec` additionally refuses obvious
 destructive patterns (`rm -rf /`, `dd of=/dev/sd*`, fork bomb, `curl … |
 sh`, …) even when shell permission is granted.
 

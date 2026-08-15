@@ -128,10 +128,11 @@ export async function repl(opts: ReplOptions = {}): Promise<number> {
     terminal: true,
     prompt: '> ',
   });
-  const lineInput = new LineInputBroker(rl);
+  const lineInput = new LineInputBroker(rl, input);
   const approver: ToolApprover = opts.approver ?? createTTYApprover({
     output: stderr,
     readLine: () => lineInput.readLine(),
+    select: request => lineInput.select(request),
   });
 
   // Turn-scoped abort controller. Replaced before each run; SIGINT pops it.
