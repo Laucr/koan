@@ -1,0 +1,97 @@
+name: Agent Task Request
+description: Submit a task for the local coding agent. Requires manual approval (agent-task label) before execution.
+title: "[Agent] "
+labels: ["needs-review"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Important
+        This issue will **not** be automatically processed by the agent.
+        After review, the repository owner will add the `agent-task` label to start the workflow.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Task Summary
+      description: One-sentence summary of what needs to be done.
+      placeholder: e.g. Add JWT-based authentication middleware for the /api/v1 endpoints
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Detailed Description
+      description: Explain the requirement clearly. Include context, current behavior, and expected behavior.
+      placeholder: |
+        Current situation:
+        - ...
+
+        Expected result:
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Clear, testable conditions that define when this task is considered complete.
+      placeholder: |
+        - [ ] Endpoint returns 401 when token is missing
+        - [ ] Valid token allows access
+        - [ ] Unit tests added and passing
+        - [ ] No breaking changes to existing public APIs
+    validations:
+      required: true
+
+  - type: textarea
+    id: related-files
+    attributes:
+      label: Related Files / Directories
+      description: List the main files or directories the agent should focus on (helps reduce context window noise).
+      placeholder: |
+        - internal/auth/
+        - pkg/middleware/jwt.go
+        - api/v1/handlers/
+    validations:
+      required: false
+
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Estimated Complexity
+      description: Rough estimate to help prioritization.
+      options:
+        - Simple (small change, < 1 hour for human)
+        - Medium (several files, moderate logic)
+        - Complex (architecture change / multiple components)
+      default: 1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Low
+        - Medium
+        - High
+      default: 1
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: The requirement is clear and self-contained
+          required: true
+        - label: I understand this will only be processed after the owner adds the `agent-task` label
+          required: true
