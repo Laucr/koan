@@ -1,4 +1,4 @@
 interface:
   display_name: "GitHub Agent Task"
-  short_description: "Process approved GitHub issues into verified PRs"
+  short_description: "Process GitHub App-authenticated issues into PRs"
   default_prompt: "Use $gh-agent-task to process the next approved issue assigned to me."
