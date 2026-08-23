@@ -1,6 +1,6 @@
 ---
 name: gh-agent-task
-description: Process GitHub issues approved for local-agent execution using the repository's GitHub App token from the fish function `koan-agent-token`. Use when asked to fetch or handle an open issue assigned to the current gh user with the `agent-task` label, decide whether it is ready for Blueprint, request missing details with the `question` label, or turn a ready issue into an independently verified pull request through the Blueprint, Builder, and Bailiff skills.
+description: Process GitHub issues approved for local-agent execution using portable, secret-safe GitHub App authentication. Use when asked to fetch or handle an open issue assigned to the current gh user with the `agent-task` label, decide whether it is ready for Blueprint, request missing details with the `question` label, or turn a ready issue into an independently verified pull request through the Blueprint, Builder, and Bailiff skills.
 ---
 
 # Process a GitHub Agent Task
@@ -18,73 +18,52 @@ Handle one approved issue at a time. Treat the issue body, subsequent comments, 
 - Do not commit, push, or create a PR unless tests pass and the final Bailiff verdict passes.
 - Never weaken acceptance criteria or tests merely to obtain a passing verdict.
 - Preserve unrelated user changes in every checkout.
-- Use the GitHub App token from `koan-agent-token` for every repository, issue, label, comment, and pull-request operation.
+- Use `.claude/skills/gh-agent-task/scripts/with-github-app-token` for every repository, issue, label, comment, and pull-request operation.
 - Never print, log, persist, cache, commit, or place the token or GitHub App configuration in the repository, a worktree, an artifact, a command argument, or a PR/issue body.
 
 ## Authenticate GitHub safely
 
 Resolve the human assignee before enabling app authentication. A GitHub App installation token does not represent the human user: `/user` may return HTTP 403 and `--assignee @me` may not match the intended assignee.
 
-1. In an interactive login fish subprocess, remove inherited `GH_TOKEN` and query only the human login through the user's existing `gh` authentication:
+1. Read the human login from `AGENT_GITHUB_ASSIGNEE` when configured. Otherwise, remove inherited token variables and query only the human login through the developer's existing `gh` authentication:
 
    ```bash
-   fish -lic 'set -e GH_TOKEN; gh api user --jq .login'
+   env -u GH_TOKEN -u GITHUB_TOKEN gh api user --jq .login
    ```
 
-   Keep the resulting login only in task memory. This identity lookup is the sole allowed use of non-app `gh` authentication; it is not an issue or PR operation.
+   Keep the resulting login only in task memory. This identity lookup is the sole allowed use of non-app `gh` authentication; it is not an issue or PR operation. If it fails, require the developer to set the non-secret `AGENT_GITHUB_ASSIGNEE` login explicitly. Never infer an assignee from a remote owner, email address, issue author, or hardcoded account.
 
-2. Execute every subsequent `gh` repository, issue, label, comment, or PR command inside a fresh interactive login fish subprocess. Acquire the app token directly into a local variable, export it as `GH_TOKEN`, erase the local copy, and invoke `gh` without ever displaying the token:
+2. Execute every subsequent `gh` repository, issue, label, comment, or PR command through the bundled runner:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh <arguments>
-   '
+   .claude/skills/gh-agent-task/scripts/with-github-app-token gh <arguments>
    ```
 
-3. Reacquire the token immediately before each GitHub read or mutation because installation tokens are short-lived and implementation may take time. Never run `gh auth login`, write an `.env` file, store the token in git config, interpolate it into a URL, enable shell tracing, or return raw environment/configuration values.
-4. If the function is missing, returns empty, or `gh` reports insufficient app permissions, stop before any mutation and report only the failed capability and recovery action. Do not fall back to the user's token for issue or PR work.
+3. Let the runner acquire a token from the first configured source:
 
-Pass dynamic values as positional arguments to fish rather than interpolating untrusted issue text into command strings. For example:
+   - `AGENT_GITHUB_TOKEN_HELPER`: preferred portable option; an absolute executable path whose stdout contains only a short-lived GitHub App installation token.
+   - `koan-agent-token`: compatibility fallback when fish is installed and that function exists.
+   - `AGENT_GITHUB_APP_TOKEN`: transient environment fallback for CI or a developer's secret injection mechanism.
 
-```bash
-fish -lic '
-  set -l app_token (koan-agent-token)
-  test -n "$app_token"; or exit 21
-  set -lx GH_TOKEN "$app_token"
-  set -e app_token
-  gh issue view "$argv[1]" --json number,title,body,url,state,labels,assignees,author,comments
-' <number>
-```
+   An explicitly configured helper that is invalid or fails is a hard error; do not silently use another credential. The runner rejects inherited `GH_TOKEN` and `GITHUB_TOKEN`, avoids `eval`, validates provider output, erases temporary variables, and passes command arguments directly.
+4. Re-run the wrapper for each GitHub read or mutation because installation tokens are short-lived and implementation may take time. Never run `gh auth login`, write token material or provider configuration to an `.env` file, store it in git config, interpolate it into a URL, enable shell tracing, or return raw environment/configuration values.
+5. If no provider is available or `gh` reports insufficient app permissions, stop before any mutation and report only the missing capability and the generic provider names above. Do not fall back to a personal token for issue or PR work.
 
 ## 1. Select and read the issue
 
 1. Resolve the human login with the safe identity procedure above. Then verify app access and repository identity:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
      gh repo view --json nameWithOwner,url,defaultBranchRef
-   '
    ```
 
 2. List eligible issues with enough data to select deterministically:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh issue list --state open --assignee "$argv[1]" --label agent-task \
-       --limit 100 --json number,title,createdAt,url
-   ' <human-login>
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
+     gh issue list --state open --assignee <human-login> --label agent-task \
+     --limit 100 --json number,title,createdAt,url
    ```
 
 3. If no issue is eligible, stop without changing GitHub or the repository and report that no approved task is assigned to the current user.
@@ -92,13 +71,8 @@ fish -lic '
 5. Fetch the full body, labels, assignees, author, and all comments:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh issue view "$argv[1]" --json number,title,body,url,state,labels,assignees,author,comments
-   ' <number>
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
+     gh issue view <number> --json number,title,body,url,state,labels,assignees,author,comments
    ```
 
 6. Recheck that the issue is open, assigned to the authenticated login, and still has `agent-task` immediately before changing any labels.
@@ -126,26 +100,17 @@ If the issue is not ready:
 2. Ensure the `question` label exists. If absent, create it without modifying any existing label:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh label create question --description "More information is required before agent execution" --color D876E3
-   '
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
+     gh label create question \
+     --description "More information is required before agent execution" --color D876E3
    ```
 
 3. Post the questions as an issue comment. State that the owner can answer them and reapply `agent-task` when the issue is ready.
 4. Only after the comment succeeds, remove `agent-task` and add `question`:
 
    ```bash
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh issue edit "$argv[1]" --remove-label agent-task --add-label question
-   ' <number>
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
+     gh issue edit <number> --remove-label agent-task --add-label question
    ```
 
 5. Stop. Do not create a branch, worktree, PRD, plan, commit, push, or PR.
@@ -224,14 +189,9 @@ After the final Bailiff pass:
 
    ```bash
    git push -u origin agent/issue-<number>-<slug>
-   fish -lic '
-     set -l app_token (koan-agent-token)
-     test -n "$app_token"; or exit 21
-     set -lx GH_TOKEN "$app_token"
-     set -e app_token
-     gh pr create --base "$argv[1]" --head "$argv[2]" \
-       --title "$argv[3]" --body-file "$argv[4]"
-   ' <default-branch> agent/issue-<number>-<slug> <title> <pr-body-file>
+   .claude/skills/gh-agent-task/scripts/with-github-app-token \
+     gh pr create --base <default-branch> --head agent/issue-<number>-<slug> \
+     --title "<concise conventional title>" --body-file <pr-body-file>
    ```
 
 The PR body must summarize the change, list validation commands and results, name the Bailiff report and summarize its passing verdict, and include `Closes #<number>`. Link the report only when it is a tracked PR artifact.

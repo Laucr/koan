@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+set +x
+
+readonly EXIT_USAGE=64
+readonly EXIT_UNAVAILABLE=69
+
+if (( $# < 2 )) || [[ "${1##*/}" != "gh" ]]; then
+  echo "usage: with-github-app-token gh <repo|issue|label|pr> [args...]" >&2
+  exit "$EXIT_USAGE"
+fi
+
+case "$2" in
+  repo | issue | label | pr) ;;
+  *)
+    echo "with-github-app-token only permits GitHub repository, issue, label, and pull-request commands" >&2
+    exit "$EXIT_USAGE"
+    ;;
+esac
+
+# Never let an inherited personal credential satisfy an app-authenticated call.
+unset GH_TOKEN GITHUB_TOKEN
+
+app_token=""
+
+if [[ -n "${AGENT_GITHUB_TOKEN_HELPER:-}" ]]; then
+  if [[ "${AGENT_GITHUB_TOKEN_HELPER}" != /* || ! -x "${AGENT_GITHUB_TOKEN_HELPER}" ]]; then
+    echo "GitHub App token helper must be an absolute executable path" >&2
+    exit "$EXIT_UNAVAILABLE"
+  fi
+
+  if ! app_token="$("${AGENT_GITHUB_TOKEN_HELPER}")"; then
+    echo "GitHub App token helper failed" >&2
+    exit "$EXIT_UNAVAILABLE"
+  fi
+elif command -v fish >/dev/null 2>&1 && fish -lic 'functions -q koan-agent-token' >/dev/null 2>&1; then
+  if ! app_token="$(fish -lic 'koan-agent-token')"; then
+    echo "GitHub App token function failed" >&2
+    exit "$EXIT_UNAVAILABLE"
+  fi
+elif [[ -n "${AGENT_GITHUB_APP_TOKEN:-}" ]]; then
+  app_token="${AGENT_GITHUB_APP_TOKEN}"
+fi
+
+if [[ -z "$app_token" ]]; then
+  echo "GitHub App token unavailable; configure AGENT_GITHUB_TOKEN_HELPER, koan-agent-token, or AGENT_GITHUB_APP_TOKEN" >&2
+  exit "$EXIT_UNAVAILABLE"
+fi
+
+if [[ "$app_token" =~ [[:space:]] ]]; then
+  echo "GitHub App token provider returned invalid output" >&2
+  exit "$EXIT_UNAVAILABLE"
+fi
+
+export GH_TOKEN="$app_token"
+unset app_token AGENT_GITHUB_APP_TOKEN AGENT_GITHUB_TOKEN_HELPER
+
+exec "$@"
